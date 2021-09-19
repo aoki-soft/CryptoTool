@@ -5,10 +5,18 @@
 
 use super::crypto;
 use log::debug;
+use rand::Rng;
+use sha3::Digest;
 use std::fs::File;
+use std::io::Write;
 use std::io::{self, Read};
 use std::os::windows::prelude::MetadataExt;
 use std::str::FromStr;
+
+enum CryptoMode {
+    Encrypt,
+    Decrypt,
+}
 
 /// # 暗号化・復号モード
 pub fn crypto_mode(
@@ -16,16 +24,16 @@ pub fn crypto_mode(
     key_file_path: Option<String>,
 ) -> std::io::Result<()> {
     // ファイルバッファリーダーを取得する
-    let (input_file_reader, input_file_size, input_file_path) = get_reader(input_file_path)?;
+    let (mut input_file_reader, input_file_size, input_file_path) = get_reader(input_file_path)?;
 
     // アウトプットファイルのパスを取得する
-    let output_file_path = prepare_output_file_name(input_file_path);
+    let (output_file_path, crypto_mode) = prepare_output_file_name(input_file_path);
 
-    // chacha20の鍵
+    // 鍵データを読み込む
     let key = read_key(key_file_path)?;
 
     // バッファライターを取得する
-    let output_file_writer =
+    let mut output_file_writer =
         std::io::BufWriter::new(match std::fs::File::create(output_file_path) {
             Ok(file) => file,
             Err(e) => {
@@ -36,15 +44,16 @@ pub fn crypto_mode(
             }
         });
 
+    // ナンスを用意する
+    let nonce = prepare_nonce(&mut input_file_reader, &mut output_file_writer, crypto_mode)?;
+
     // プログレスバーのセットアップ
     let progress_bar = prepare_progress_bar(input_file_size);
-
-    let nonce = b"secret nonce";
 
     // 暗号化
     crypto::crypto_chacha20(
         &key,
-        nonce,
+        &nonce,
         input_file_reader,
         output_file_writer,
         progress_bar,
@@ -111,15 +120,19 @@ fn get_reader(
 /// # 書き出し先ファイル名の取得
 /// 拡張子が`.c20`だったら拡張子を削除して、
 /// それ以外には`.c20`の拡張子を追加する
-fn prepare_output_file_name(input_file_path: std::path::PathBuf) -> std::path::PathBuf {
+fn prepare_output_file_name(
+    input_file_path: std::path::PathBuf,
+) -> (std::path::PathBuf, CryptoMode) {
     let mut output_file_path = input_file_path.clone();
     let extension = input_file_path.extension();
     debug!("input_file: {:?}", output_file_path);
+    let mut crypto_mode = CryptoMode::Encrypt;
     let output_file_path = match extension {
         None => output_file_path.with_extension("c20"),
         Some(extension) => {
             if extension == "c20" {
                 debug!("extension: {:?} ==c20", extension);
+                crypto_mode = CryptoMode::Decrypt;
                 output_file_path.with_extension("")
             } else {
                 debug!("extension: {:?} !=c20", extension);
@@ -131,7 +144,7 @@ fn prepare_output_file_name(input_file_path: std::path::PathBuf) -> std::path::P
         }
     };
     debug!("output_file_path: {:?}", output_file_path);
-    output_file_path
+    (output_file_path, crypto_mode)
 }
 
 /// # プログレスバーのセットアップ
@@ -225,6 +238,69 @@ fn read_key(key_file_path: Option<String>) -> io::Result<[u8; 32]> {
             "読み取った鍵ファイルのサイズが32byte以外でした",
         ));
     }
-
     Ok(key)
+}
+
+/// # ナンス生成
+/// 現在の日時と乱数で元になる値を生成してsha3_256でハッシュ値を求めて最初の12byteを出力します。
+fn generate_nonce() -> [u8; 12] {
+    let time_stamp_nanos = chrono::Utc::now().timestamp_nanos();
+    let time_stamp: [u8; 8] = time_stamp_nanos.to_be_bytes();
+
+    let mut rng = rand::thread_rng();
+    let random: [u8; 4] = rng.gen();
+    let mut nonce_non_hash = time_stamp.to_vec();
+    nonce_non_hash.extend(random);
+    debug!("nonce_non_hash: {:?}", nonce_non_hash);
+
+    let mut hasher = sha3::Sha3_256::new();
+    let _ = hasher.write(&nonce_non_hash).unwrap();
+    let nonce_hashed = hasher.finalize();
+
+    let mut nonce_return: [u8; 12] = [0; 12];
+    for i in 0..12 {
+        nonce_return[i] = nonce_hashed[i];
+    }
+    debug!("nonce_hashed: {:?}", nonce_return);
+    nonce_return
+}
+
+/// # ノンスの生成/読み取り/書き込み
+/// - 暗号化モードならノンスを生成してアウトプットファイルの先頭に書き込む。
+/// - 復号モードならインプットファイルからノンスを読み込んで返す。
+fn prepare_nonce(
+    input_file_reader: &mut impl std::io::Read,
+    output_file_writer: &mut impl std::io::Write,
+    crypto_mode: CryptoMode,
+) -> io::Result<[u8; 12]> {
+    let mut nonce = [0; 12];
+    match crypto_mode {
+        CryptoMode::Encrypt => {
+            // nonceの生成
+            nonce = generate_nonce();
+            // nonceをwriterの一番最初に書き込む
+            match output_file_writer.write(&nonce) {
+                Ok(_) => (),
+                Err(e) => {
+                    debug!("書き込み先のファイルにナンスを書き込めませんでした。");
+                    debug!("{:?}", e);
+                    println!("書き込み先のファイルに書き込みが出来ませんでした。");
+                    return Err(e);
+                }
+            }
+        }
+        CryptoMode::Decrypt => {
+            // インプットファイルから先頭12byteを読み込む
+            match input_file_reader.read(&mut nonce) {
+                Ok(_) => (),
+                Err(e) => {
+                    debug!("インプットファイルから先頭12byte(ナンス)を読み込めませんでした");
+                    debug!("{:?}", e);
+                    println!("インプットファイルを読み込めませんでした。");
+                    return Err(e);
+                }
+            }
+        }
+    };
+    Ok(nonce)
 }

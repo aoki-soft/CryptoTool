@@ -6,17 +6,23 @@
 use super::crypto;
 use log::debug;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::os::windows::prelude::MetadataExt;
 use std::str::FromStr;
 
 /// # 暗号化・復号モード
-pub fn crypto_mode(input_file_path: Option<String>) -> std::io::Result<()> {
+pub fn crypto_mode(
+    input_file_path: Option<String>,
+    key_file_path: Option<String>,
+) -> std::io::Result<()> {
     // ファイルバッファリーダーを取得する
     let (input_file_reader, input_file_size, input_file_path) = get_reader(input_file_path)?;
 
     // アウトプットファイルのパスを取得する
     let output_file_path = prepare_output_file_name(input_file_path);
+
+    // chacha20の鍵
+    let key = read_key(key_file_path)?;
 
     // バッファライターを取得する
     let output_file_writer =
@@ -33,13 +39,11 @@ pub fn crypto_mode(input_file_path: Option<String>) -> std::io::Result<()> {
     // プログレスバーのセットアップ
     let progress_bar = prepare_progress_bar(input_file_size);
 
-    // chacha20
-    let key = b"an example very very secret key.";
     let nonce = b"secret nonce";
 
     // 暗号化
     crypto::crypto_chacha20(
-        key,
+        &key,
         nonce,
         input_file_reader,
         output_file_writer,
@@ -142,4 +146,85 @@ fn prepare_progress_bar(input_file_size: u64) -> indicatif::ProgressBar {
     // 1秒に4回プログレスバーを更新すると、少しパフォーマンスに影響出てきそう(2.5GHz 4core)
     progress_bar.set_draw_rate(4);
     progress_bar
+}
+
+/// 鍵データの読み込み
+fn read_key(key_file_path: Option<String>) -> io::Result<[u8; 32]> {
+    // ファイルパスが引数に入っていることをチェックする
+    let input_path = match key_file_path {
+        Some(path) => path,
+        None => {
+            debug!("鍵ファイル名が入力されていませんでした。");
+            println!("鍵ファイル名を入力してください");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "鍵ファイル名が入力されていませんでした。",
+            ));
+        }
+    };
+    // ファイルパスを特定する
+    let input_path = match std::path::PathBuf::from_str(&input_path) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!("鍵ファイルパスが誤っています。");
+            debug!("{:?}", e);
+            println!("入力された鍵ファイルパスが誤っています。");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "入力された鍵ファイルパスが誤っています。",
+            ));
+        }
+    };
+    // ファイルをオープンする
+    let mut input_file = match std::fs::File::open(input_path) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("鍵ファイルにアクセスできませんでした。");
+            debug!("{:?}", e);
+            println!("鍵ファイルにアクセスできませんでした。");
+            return Err(e);
+        }
+    };
+    // 鍵ファイルサイズを取得する 鍵ファイルが32byte以外だった場合はErrを返す
+    let file_size = match input_file.metadata() {
+        Ok(metadata) => metadata.file_size(),
+        Err(e) => {
+            debug!("鍵ファイルのメタデータを取得出来ませんでした。");
+            debug!("{:?}", e);
+            println!("鍵ファイルのメタデータを取得出来ませんでした。");
+            return Err(e);
+        }
+    };
+    if file_size != 32 {
+        debug!("鍵ファイルが32byteではありませんでした。");
+        println!("鍵ファイルが32byteではありませんでした。");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "鍵ファイルのサイズが32byte以外のため不正です",
+        ));
+    };
+
+    // 鍵ファイルを読み込む
+    let mut key = [0; 32];
+    let result = input_file.read(&mut key);
+
+    let size = match result {
+        Ok(size) => size,
+        Err(e) => {
+            debug!("鍵ファイルを読み込めませんでした。");
+            debug!("{:?}", e);
+            println!("鍵ファイルを読み込めませんでした");
+            return Err(e);
+        }
+    };
+    if size != 32 {
+        debug!("読み取った鍵ファイルのサイズが32byte以外でした");
+        println!("鍵ファイルを読み込めませんでした");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "読み取った鍵ファイルのサイズが32byte以外でした",
+        ));
+    }
+
+    Ok(key)
 }

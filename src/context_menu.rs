@@ -3,7 +3,7 @@
 //! 注意 windows でしか使うことができません。
 
 /// コンテクストメニューにコマンドを追加します。
-pub fn set_to_context_menu() -> Result<(), std::io::Error> {
+pub fn set_to_context_menu(key_file_path: &str) -> Result<(), std::io::Error> {
     // 登録済みの設定を削除する
     remove_key_from_file_menu(r"CryptoTool")?;
 
@@ -20,8 +20,9 @@ pub fn set_to_context_menu() -> Result<(), std::io::Error> {
         r"CryptoTool\shell\ChaCha20\Command",
         r"'(default)'",
         &format!(
-            "'\"{}\" -i \"%V\" -k \"test.key\"'",
-            std::env::current_exe().unwrap().display()
+            "'\"{}\" -i \"%V\" -k \"{}\"'",
+            std::env::current_exe().unwrap().display(),
+            key_file_path
         ),
     )?;
 
@@ -102,16 +103,4 @@ fn remove_key_from_file_menu(post_path: &str) -> Result<(), std::io::Error> {
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    #[test]
-    fn set_remove() {
-        let ok = set_to_context_menu().is_ok();
-        assert!(ok);
-        let ok = remove_from_context_menu().is_ok();
-        assert!(ok);
-    }
 }

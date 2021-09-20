@@ -58,7 +58,10 @@ pub fn crypto_mode(
         output_file_writer,
         progress_bar,
     );
-
+    println!("Enterキーを押すと終了します");
+    let mut word = String::new();
+    std::io::stdin().read_line(&mut word).ok();
+    debug!("アプリ終了");
     Ok(())
 }
 
